@@ -1,12 +1,12 @@
-#include <ArduinoWebsockets.h>
 #include <ESP8266WiFi.h>
+#include <ESP8266WiFiMulti.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecureBearSSL.h>
 #include "secrets.h"
 
 #define DEBUG 0
 #define CHART 0
 #define HISTOGRAM_SIZE 1024
-
-using namespace websockets;
 
 int highCurrentOut = 5; // D1 to 100k R
 int lowCurrentOut = 4;  // D2 to 1M R
@@ -26,7 +26,7 @@ short histogram[HISTOGRAM_SIZE];
 int webSendFrequency = 500;
 int webSendCounter = 0;
 
-WebsocketsClient client;
+ESP8266WiFiMulti WiFiMulti;
 
 void setup() {
   pinMode(highCurrentOut, OUTPUT);
@@ -38,17 +38,16 @@ void setup() {
   dataList = createRing();
   Serial.println("\nMovingAverage");
 
-  WiFi.begin(SECRET_SSID, SECRET_PASS);
-  while(WiFi.status() != WL_CONNECTED) {
-      Serial.print(".");
-      delay(1000);
-  }
+  WiFi.mode(WIFI_STA);
+  WiFiMulti.addAP(SECRET_SSID, SECRET_PASS);
   Serial.println("Connected to WIFI.");
-  connect();
+  if ((WiFiMulti.run() != WL_CONNECTED)) {
+    Serial.println("WIFI Init failed");
+    while(1) {}
+  }
 }
 
 void loop() {
-  client.poll();
   // measure high
   digitalWrite(highCurrentOut, HIGH);
   delay(sensingDelay);
@@ -138,6 +137,10 @@ void sendHistogram() {
   webSendCounter++;
   if(webSendCounter >= webSendFrequency) {
     webSendCounter = 0;
+    std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure); 
+    client->setFingerprint(SECRET_FINGER_PRINT);
+    HTTPClient https;
+    https.begin(*client, SECRET_SERVER);
     Serial.println("Preparing Web Data");
     String data = "{\"data\":\"";
     for(int i = 0; i < HISTOGRAM_SIZE; i++) {
@@ -147,45 +150,15 @@ void sendHistogram() {
       data += ";"; 
     }
     data += "\"}";
-    client.send(data);
-    Serial.println("Web data sent\n");
-  }
-}
 
-void onEventsCallback(WebsocketsEvent event, String data) {
-    if(event == WebsocketsEvent::ConnectionOpened) {
-      Serial.println("Connnection Opened");
-      // Send a ping
-      client.ping();
-    } else if(event == WebsocketsEvent::ConnectionClosed) {
-      //CloseReason reason = client.getCloseReason();
-      Serial.println("Connnection Closed. Reason:");
-      CloseReason reason = client.getCloseReason();
-      Serial.println(reason);
-    } else if(event == WebsocketsEvent::GotPing) {
-      Serial.println("Got a Ping!");
-      client.pong();
-    } else if(event == WebsocketsEvent::GotPong) {
-      Serial.println("Got a Pong!");
+    https.addHeader("Content-Type", "application/json");
+    int httpCode = https.POST(data);
+    if (httpCode > 0) {
+      // HTTP header has been send and Server response header has been handled
+      Serial.printf("[HTTP] POST... code: %d\n", httpCode);
+    } else {
+      Serial.printf("[HTTP] POST... failed, error: %s\n", https.errorToString(httpCode).c_str());
     }
-}
-
-void connect() {
-  // run callback when messages are received
-  client.onMessage([](WebsocketsMessage msg){
-    Serial.println("Got Message: " + msg.data());
-  });
-  Serial.println("Register onMsg");
-  
-  // run callback when events are occuring
-  client.onEvent(onEventsCallback);
-  Serial.println("Register onEvent");
-  
-  // Before connecting, set the ssl fingerprint of the server
-  client.setInsecure();
-  Serial.println("Set Insecure");
-  
-  // Connect to server
-  client.connect(SECRET_SERVER);
-  Serial.println("Connected to WS server");
+    https.end();
+  }
 }
